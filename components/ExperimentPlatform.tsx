@@ -1,16 +1,35 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import * as XLSX from "xlsx";
 
-type Group = "prompted" | "ai" | "control";
-type Screen = "login" | "confirm" | "safety" | "chat" | "post" | "done";
+// ── 型別 ──────────────────────────────────────────────────────────
+// 三組：intervention（MI+第三視角）、control（無操弄AI）、diary（日記書寫）
+type Group = "intervention" | "control" | "diary";
+type Screen = "login" | "confirm" | "safety" | "pre_panas" | "chat" | "post_panas" | "done";
 
+// ── 分組邏輯：根據編號開頭字母 ──────────────────────────────────
+// E 開頭 → intervention（AI 實驗組）
+// C 開頭 → control（AI 對照組）
+// D 開頭 → diary（日記書寫組）
 function hashGroup(pid: string): Group {
-  const num = parseInt(pid.replace(/\D/g, ""), 10);
-  if (num <= 40) return "prompted";
-  if (num <= 80) return "ai";
-  return "control";
+  const prefix = pid.trim().toUpperCase()[0];
+  if (prefix === "E") return "intervention";
+  if (prefix === "C") return "control";
+  if (prefix === "D") return "diary";
+  return "diary";
+}
+
+function groupLabel(g: Group): string {
+  if (g === "intervention") return "AI 對話組（實驗）";
+  if (g === "control") return "AI 對話組（對照）";
+  return "日記書寫組";
+}
+
+// ── 編號格式驗證：E/C/D 開頭 + 至少一個數字，例如 E001 ──────────
+function validatePid(pid: string): string | null {
+  if (!pid.trim()) return "請輸入研究編號";
+  if (!/^[ECDecd]\d+$/.test(pid.trim())) return "編號格式不正確（應為 E001、C001 或 D001）";
+  return null;
 }
 
 function today() { return new Date().toISOString().slice(0, 10); }
@@ -22,70 +41,21 @@ function loadData(pid: string) {
 function saveData(pid: string, data: object) {
   try { localStorage.setItem(`exp_${pid}`, JSON.stringify(data)); } catch { }
 }
-function apiRoute(_g: Group) {
-  return "/api/chat-openai";
-}
 
 interface Message { role: "user" | "assistant"; content: string; }
-interface PostData {
-  emotion: number;
-  mental_demand: number;
-  effort: number;
-  control: number;
-  attribution: number;
-}
-
-// ── Export ────────────────────────────────────────────────────
-
-function exportToExcel(pid: string) {
-  const saved = loadData(pid);
-  if (!saved || !saved.sessions?.length) { alert("尚無資料可匯出"); return; }
-  const wb = XLSX.utils.book_new();
-  const summaryRows = saved.sessions.map((s: {
-    date: string; dayNum: number; elapsed: number; distress?: number;
-    post?: PostData; messages?: Message[]; text?: string; word_count?: number;
-  }) => ({
-    參與者編號: pid, 組別: saved.group, 日期: s.date, 第幾天: s.dayNum,
-    任務前困擾程度: s.distress ?? "",
-    任務時間_秒: s.elapsed ?? "",
-    任務後情緒: s.post?.emotion ?? "",
-    心智需求: s.post?.mental_demand ?? "",
-    努力程度: s.post?.effort ?? "",
-    主觀掌控: s.post?.control ?? "",
-    改善歸因: s.post?.attribution ?? "",
-    訊息則數_AI組: s.messages ? s.messages.filter((m: Message) => m.role === "user").length : "",
-    字數_日記組: s.word_count ?? "",
-  }));
-  const ws1 = XLSX.utils.json_to_sheet(summaryRows);
-  ws1["!cols"] = [14,10,12,8,14,12,12,10,10,10,10,14,12].map(w => ({ wch: w }));
-  XLSX.utils.book_append_sheet(wb, ws1, "每日摘要");
-  const msgRows: object[] = [];
-  saved.sessions.forEach((s: { date: string; dayNum: number; messages?: Message[] }) => {
-    if (!s.messages) return;
-    s.messages.forEach((m: Message, idx: number) => {
-      msgRows.push({ 參與者編號: pid, 組別: saved.group, 日期: s.date, 第幾天: s.dayNum, 訊息序號: idx+1, 角色: m.role === "user" ? "受試者" : "AI", 內容: m.content });
-    });
-  });
-  if (msgRows.length > 0) {
-    const ws2 = XLSX.utils.json_to_sheet(msgRows);
-    ws2["!cols"] = [14,10,12,8,8,8,60].map(w => ({ wch: w }));
-    XLSX.utils.book_append_sheet(wb, ws2, "對話紀錄");
-  }
-  XLSX.writeFile(wb, `experiment_${pid}_${today()}.xlsx`);
-}
-
-// ── Main ──────────────────────────────────────────────────────
-
+// ── Main ──────────────────────────────────────────────────────────
 export default function ExperimentPlatform() {
   const [screen, setScreen]     = useState<Screen>("login");
   const [pid, setPid]           = useState("");
   const [inputPid, setInputPid] = useState("");
-  const [group, setGroup]       = useState<Group>("prompted"); // 佔位值，handleConfirm 時會覆蓋為實際組別
+  const [group, setGroup]       = useState<Group>("diary");
   const [dayNum, setDayNum]     = useState(1);
   const [error, setError]       = useState("");
   const [distress, setDistress] = useState(30);
   const [safetyChecked, setSafetyChecked] = useState(false);
   const [taskData, setTaskData] = useState<object>({});
+  const [prePanas, setPrePanas] = useState<Record<string, number>>({});
+  const [postPanas, setPostPanas] = useState<Record<string, number>>({});
   const [showSupport, setShowSupport] = useState(false);
 
   const doneToday = (() => {
@@ -98,9 +68,9 @@ export default function ExperimentPlatform() {
   })();
 
   function handleLogin() {
-    const trimmed = inputPid.trim();
-    if (!trimmed) { setError("請輸入研究編號"); return; }
-    if (trimmed.length < 2) { setError("編號格式不正確"); return; }
+    const trimmed = inputPid.trim().toUpperCase();
+    const err = validatePid(trimmed);
+    if (err) { setError(err); return; }
     setPid(trimmed); setError(""); setScreen("confirm");
   }
 
@@ -117,35 +87,51 @@ export default function ExperimentPlatform() {
 
   function handleSafetyNext() {
     if (!safetyChecked) return;
-    // 所有組別（含 control）都走相同流程：任務 → 問卷 → 完成頁
-    setScreen("chat");
+    setScreen("pre_panas");
   }
 
   function handleTaskDone(data: object) {
     setTaskData(data);
-    setScreen("post");
+    setScreen("post_panas");
   }
 
   function handleTaskStop() {
     setScreen("done");
   }
 
-  async function handlePostDone(postData: PostData) {
-    const newSession = { date: today(), dayNum, ...taskData, distress, post: postData };
+  async function handlePostDone(postPanasData: Record<string, number>) {
+    const newSession = { date: today(), dayNum, ...taskData, distress, pre_panas: prePanas, post_panas: postPanasData };
     const saved = loadData(pid) ?? { pid, group, sessions: [] };
     saved.sessions = [
       ...(saved.sessions ?? []).filter((s: { date: string }) => s.date !== today()),
       newSession
     ];
     saveData(pid, saved);
+
+    // ── 上傳 Google Sheets ──────────────────────────────────────
     try {
+      const td = taskData as { messages?: Message[]; text?: string; word_count?: number; elapsed?: number };
       await fetch("/api/save-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pid, group, session: newSession }),
+        body: JSON.stringify({
+          pid, group,
+          dayNum,
+          date: today(),
+          elapsed: td.elapsed ?? 0,
+          messages: td.messages ?? [],
+          text: td.text ?? "",
+          word_count: td.word_count ?? 0,
+          distress,
+          pre_panas: prePanas,
+          post_panas: postPanasData,
+        }),
       });
     } catch (e) { console.error("Sheets 失敗", e); }
-    setScreen("done");
+
+    // ── 跳轉 Qualtrics ──────────────────────────────────────────
+    window.location.href =
+      `https://tassel.syd1.qualtrics.com/jfe/form/SV_3C7St6TVaubaUgS?participant_id=${encodeURIComponent(pid)}&group=${group}&day=${dayNum}`;
   }
 
   const sessions = (() => {
@@ -154,7 +140,7 @@ export default function ExperimentPlatform() {
     return loadData(trimmed)?.sessions?.length ?? 0;
   })();
 
-  // ── Screens ──
+  // ── Screens ──────────────────────────────────────────────────
 
   if (screen === "login") return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"1.5rem", background:"var(--bg-tertiary)" }}>
@@ -191,35 +177,19 @@ export default function ExperimentPlatform() {
           <input
             type="text" value={inputPid}
             onChange={e => { setInputPid(e.target.value); setError(""); }}
-            onKeyDown={e => {
-              if (e.key === "Enter" && !doneToday) {
-                e.preventDefault();
-                handleLogin();
-              }
-            }}
+            onKeyDown={e => { if (e.key === "Enter" && !doneToday) { e.preventDefault(); handleLogin(); } }}
             placeholder="請輸入研究人員提供的編號"
             style={{ marginBottom: error ? "0.5rem" : "1.25rem" }}
           />
           {error && <p style={{ fontSize:12, color:"var(--text-danger)", marginBottom:"1rem" }}>⚠ {error}</p>}
 
           <div style={{ display:"flex", gap:8 }}>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                handleLogin();
-              }}
-              disabled={doneToday}
-              className="primary"
-              style={{ flex:2, padding:"0.625rem", cursor: doneToday ? "not-allowed" : "pointer" }}
-            >
+            <button type="button" onClick={handleLogin} disabled={doneToday} className="primary"
+              style={{ flex:2, padding:"0.625rem", cursor: doneToday ? "not-allowed" : "pointer" }}>
               {doneToday ? "今日已完成" : `開始今日任務（第 ${sessions+1} 天）`}
             </button>
-            <button
-              type="button"
-              onClick={() => setShowSupport(s => !s)}
-              style={{ flex:1, padding:"0.625rem", fontSize:12 }}
-            >
+            <button type="button" onClick={() => setShowSupport(s => !s)}
+              style={{ flex:1, padding:"0.625rem", fontSize:12 }}>
               聯絡資訊
             </button>
           </div>
@@ -229,8 +199,7 @@ export default function ExperimentPlatform() {
               <strong style={{ color:"var(--text)", display:"block", marginBottom:4 }}>研究聯絡資訊</strong>
               研究人員：林冠妤<br/>
               Email：carol921011@gmail.com<br/>
-              電話：0978-260-566<br/>
-              <br/>
+              電話：0978-260-566<br/><br/>
               <strong style={{ color:"var(--text)", display:"block", marginBottom:2 }}>心理支持資源</strong>
               安心專線：1925（24小時）<br/>
               張老師專線：1980<br/>
@@ -271,18 +240,17 @@ export default function ExperimentPlatform() {
 
           <div style={{ background:"var(--bg-warning)", border:"0.5px solid var(--border-warning)", borderRadius:"var(--radius)", padding:"1rem 1.25rem", marginBottom:"1.5rem", fontSize:13, color:"var(--text-warning)", lineHeight:1.8 }}>
             <strong style={{ display:"block", marginBottom:6 }}>請注意</strong>
-            請向 AI 分享與任務相關的內容及感受。請盡可能詳細地描述這段經驗，並沉浸在其中。請自由地表達你對這個經驗所產生的任何情緒與想法，不論是什麼都可以。請與 AI 進行對話至少 10 分鐘。<br/><br/>
+            {group === "diary"
+              ? "請書寫與任務相關的內容及感受。請盡可能詳細地描述這段經驗，並沉浸在其中。請自由地表達你對這個經驗所產生的任何情緒與想法。書寫時間為 10 分鐘。"
+              : "請向 AI 分享與任務相關的內容及感受。請盡可能詳細地描述這段經驗，並沉浸在其中。請自由地表達你對這個經驗所產生的任何情緒與想法，不論是什麼都可以。請與 AI 進行對話至少 10 分鐘。"
+            }<br/><br/>
             請<strong>避免</strong>涉及：創傷事件、急性心理危機、或可辨識他人的個人資料（姓名、學號、電話、地址等）。<br/><br/>
             若在任務過程中感到不適，可隨時停止並查看支持資源。
           </div>
 
           <label style={{ display:"flex", alignItems:"flex-start", gap:10, marginBottom:"1.75rem", cursor:"pointer" }}>
-            <input
-              type="checkbox"
-              checked={safetyChecked}
-              onChange={e => setSafetyChecked(e.target.checked)}
-              style={{ marginTop:2, flexShrink:0, width:16, height:16 }}
-            />
+            <input type="checkbox" checked={safetyChecked} onChange={e => setSafetyChecked(e.target.checked)}
+              style={{ marginTop:2, flexShrink:0, width:16, height:16 }} />
             <span style={{ fontSize:14, lineHeight:1.6 }}>我已閱讀並了解上述說明，今日將書寫適當範疇的困擾。</span>
           </label>
 
@@ -297,11 +265,7 @@ export default function ExperimentPlatform() {
             </div>
           </div>
 
-          <button
-            onClick={handleSafetyNext}
-            disabled={!safetyChecked}
-            className="primary" style={{ width:"100%", padding:"0.625rem" }}
-          >
+          <button onClick={handleSafetyNext} disabled={!safetyChecked} className="primary" style={{ width:"100%", padding:"0.625rem" }}>
             {safetyChecked ? "開始今日任務 →" : "請先勾選確認事項"}
           </button>
         </div>
@@ -309,26 +273,42 @@ export default function ExperimentPlatform() {
     </div>
   );
 
-  if (screen === "chat") return group === "control"
-    ? <ControlTask onDone={handleTaskDone} />
+  if (screen === "pre_panas") return (
+    <PanasScreen
+      timing="pre"
+      onDone={(data) => { setPrePanas(data); setScreen("chat"); }}
+    />
+  );
+
+  if (screen === "chat") return group === "diary"
+    ? <DiaryTask onDone={handleTaskDone} onStop={handleTaskStop} />
     : <ChatTask dayNum={dayNum} group={group} onDone={handleTaskDone} onStop={handleTaskStop} />;
 
-  if (screen === "post") return <PostQuestionnaire group={group} onDone={handlePostDone} />;
+  if (screen === "post_panas") return (
+    <PanasScreen
+      timing="post"
+      onDone={(data) => { setPostPanas(data); handlePostDone(data); }}
+    />
+  );
 
   if (screen === "done") return <DoneScreen dayNum={dayNum} pid={pid} onLogout={() => { setInputPid(""); setPid(""); setScreen("login"); }} />;
 
   return null;
 }
 
-// ── Screen 3: Chat ────────────────────────────────────────────
-
+// ── ChatTask（AI 兩組共用）───────────────────────────────────────
 function ChatTask({ dayNum, group, onDone, onStop }: {
   dayNum: number; group: Group;
   onDone: (d: object) => void;
   onStop: () => void;
 }) {
+  // 開場白依組別不同
+  const opening = group === "intervention"
+    ? "你好，很高興你願意花時間和我說說話。今天有什麼事情想和我分享嗎？"
+    : "您好！我是這裡的 AI 助理。請隨時跟我分享您最近遇到的困擾或壓力。";
+
   const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", content: `你好，請你分享你今天遇到的問題與困擾，以及你的感受和想法是什麼，可以盡量描述細節等等。` }
+    { role: "assistant", content: opening }
   ]);
   const [input, setInput]         = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -336,9 +316,12 @@ function ChatTask({ dayNum, group, onDone, onStop }: {
   const [started, setStarted]     = useState(false);
   const [composing, setComposing] = useState(false);
   const [showDisclaimer, setShowDisclaimer] = useState(true);
+  // phase 追蹤三個引導問題的進度（只有 intervention 組使用）
+  // 0=尚未觸發, 1=第一問已問, 2=第二問已問, 3=第三問已問, 4=全部完成
+  const [phase, setPhase] = useState(0);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const MIN = 600;
+  const MIN = 600; // 10 分鐘
 
   useEffect(() => {
     if (!started) return;
@@ -357,22 +340,16 @@ function ChatTask({ dayNum, group, onDone, onStop }: {
     textareaRef.current?.focus();
     setStreaming(true);
     try {
-      const res = await fetch(apiRoute(group), {
+      const res = await fetch("/api/chat-openai", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ messages: next, group }),
+        body: JSON.stringify({ messages: next, group, elapsed, phase }),
       });
       if (!res.ok) throw new Error();
-      const reader = res.body!.getReader();
-      const dec = new TextDecoder(); let reply = "";
-      setMessages(p => [...p, { role:"assistant", content:"" }]);
-      while (true) {
-        const { done, value } = await reader.read(); if (done) break;
-        for (const line of dec.decode(value).split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          const payload = line.slice(6); if (payload === "[DONE]") break;
-          try { reply += JSON.parse(payload).text; setMessages(p => [...p.slice(0,-1), { role:"assistant", content:reply }]); } catch { }
-        }
-      }
+      const data = await res.json();
+      const reply = data.reply ?? "（無法取得回應）";
+      // 更新 phase（只有 intervention 組的 API 會回傳 nextPhase）
+      if (data.nextPhase !== undefined) setPhase(data.nextPhase);
+      setMessages(p => [...p, { role: "assistant", content: reply }]);
     } catch { setMessages(p => [...p, { role:"assistant", content:"（連線發生問題，請稍後再試）" }]); }
     setStreaming(false); textareaRef.current?.focus();
   }
@@ -412,20 +389,15 @@ function ChatTask({ dayNum, group, onDone, onStop }: {
       </div>
 
       <div style={{ display:"flex", gap:8, marginBottom:"0.75rem" }}>
-        <textarea
-          ref={textareaRef} value={input}
+        <textarea ref={textareaRef} value={input}
           onChange={e => setInput(e.target.value)}
           onCompositionStart={() => setComposing(true)}
           onCompositionEnd={() => setComposing(false)}
           onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey && !composing) { e.preventDefault(); send(); } }}
-          placeholder="輸入訊息⋯請勿輸入姓名、學號、電話、地址或 Email（Enter 送出）"
+          placeholder="輸入訊息⋯（Enter 送出，Shift+Enter 換行）"
           rows={3} style={{ flex:1, resize:"none", fontSize:13 }}
         />
         <button onClick={send} disabled={streaming || !input.trim()} style={{ alignSelf:"flex-end", padding:"0.5rem 1rem" }}>送出</button>
-      </div>
-
-      <div style={{ display:"flex", gap:8, marginBottom:"0.5rem" }}>
-        <button onClick={() => { if (confirm("確定要停止今日任務嗎？")) onStop(); }} style={{ flex:1, fontSize:13, padding:"0.5rem", color:"var(--text-danger)", borderColor:"var(--border-danger)" }}>停止今日任務</button>
       </div>
 
       <button onClick={() => onDone({ messages, elapsed })} disabled={!canFinish} className="primary" style={{ width:"100%", padding:"0.625rem" }}>
@@ -435,118 +407,64 @@ function ChatTask({ dayNum, group, onDone, onStop }: {
   );
 }
 
-function ControlTask({ onDone }: { onDone: (d: object) => void }) {
+// ── DiaryTask（日記書寫組）───────────────────────────────────────
+function DiaryTask({ onDone, onStop }: {
+  onDone: (d: object) => void;
+  onStop: () => void;
+}) {
+  const [text, setText]       = useState("");
   const [elapsed, setElapsed] = useState(0);
-  const MIN = 600;
+  const MIN = 600; // 10 分鐘
+  const MIN_WORDS = 100;
 
   useEffect(() => {
     const id = setInterval(() => setElapsed(e => e + 1), 1000);
     return () => clearInterval(id);
   }, []);
 
-  const canFinish = elapsed >= MIN;
+  const wordCount = text.trim().length;
   const remaining = Math.max(0, MIN - elapsed);
+  const canFinish = elapsed >= MIN && wordCount >= MIN_WORDS;
 
   return (
     <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", maxWidth:640, margin:"0 auto", padding:"1.5rem 1rem" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"1rem" }}>
-        <p style={{ fontSize:18, fontWeight:500, margin:0 }}>休息時間</p>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"0.75rem" }}>
+        <p style={{ fontSize:18, fontWeight:500, margin:0 }}>今日書寫</p>
         <div style={{ fontSize:13, padding:"4px 12px", borderRadius:"var(--radius)", background: elapsed >= MIN ? "var(--bg-success)" : "var(--bg-secondary)", color: elapsed >= MIN ? "var(--text-success)" : "var(--text-secondary)", border:`0.5px solid ${elapsed >= MIN ? "var(--border-success)" : "var(--border)"}` }}>
-          {elapsed >= MIN ? "✓ 完成" : fmtTime(remaining)}
+          {elapsed >= MIN ? "✓ 已達最低時間" : `剩餘 ${fmtTime(remaining)}`}
         </div>
       </div>
-      <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:"1.5rem" }}>
-        <div style={{ width:64, height:64, borderRadius:"50%", background:"var(--bg-secondary)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:28 }}>
-          🕐
-        </div>
-        <p style={{ fontSize:15, color:"var(--text-secondary)", textAlign:"center", lineHeight:1.7, maxWidth:320 }}>
-          請靜待 10 分鐘。<br/>你可以放鬆休息，不需要做任何事。
-        </p>
-        {!canFinish && (
-          <p style={{ fontSize:13, color:"var(--text-tertiary)" }}>
-            剩餘 {fmtTime(remaining)}
-          </p>
-        )}
+
+      <div style={{ background:"var(--bg-secondary)", border:"0.5px solid var(--border)", borderRadius:"var(--radius)", padding:"0.75rem 1rem", marginBottom:"0.75rem", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        請書寫今天讓你感到困擾或壓力的事件，以及你的想法和感受。請盡量詳細描述，至少 {MIN_WORDS} 字。
       </div>
+
+      <textarea
+        value={text}
+        onChange={e => setText(e.target.value)}
+        placeholder="請在這裡書寫你的困擾或壓力經驗⋯"
+        style={{ flex:1, resize:"none", fontSize:14, lineHeight:1.8, minHeight:360, marginBottom:"0.75rem", padding:"1rem" }}
+      />
+
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-secondary)", marginBottom:"0.75rem" }}>
+        <span>已輸入 {wordCount} 字{wordCount < MIN_WORDS ? `（至少需要 ${MIN_WORDS} 字）` : " ✓"}</span>
+      </div>
+
       <button
-        onClick={() => onDone({ elapsed })}
+        onClick={() => onDone({ text, word_count: wordCount, elapsed })}
         disabled={!canFinish}
         className="primary"
         style={{ width:"100%", padding:"0.625rem" }}
       >
-        {canFinish ? "繼續 →" : `請等待（${fmtTime(remaining)}）`}
+        {canFinish ? "完成書寫，填寫問卷 →" : `請繼續書寫（${wordCount < MIN_WORDS ? `還需 ${MIN_WORDS - wordCount} 字` : fmtTime(remaining)}）`}
       </button>
     </div>
   );
 }
 
-// ── Screen 4: Post Questionnaire ──────────────────────────────
+// ── PostQuestionnaire ─────────────────────────────────────────────
 
-function PostQuestionnaire({ group, onDone }: { group: Group; onDone: (d: PostData) => void }) {
-  const [emotion,       setEmotion]      = useState(50);
-  const [mentalDemand,  setMentalDemand] = useState(50);
-  const [effort,        setEffort]       = useState(50);
-  const [control,       setControl]      = useState(50);
-  const [attribution,   setAttribution]  = useState(50);
-
-  const isAI = group !== "control";
-
-  const sliders = [
-    { label:"任務後情緒狀態", desc:"完成任務後，你目前的整體情緒感受如何？", val:emotion, set:setEmotion, lo:"非常負向", hi:"非常正向" },
-    { label:"心智需求", desc:"這個任務需要多少心理與認知上的努力（如思考、整理、表達）？", val:mentalDemand, set:setMentalDemand, lo:"非常低", hi:"非常高" },
-    { label:"努力程度", desc:"你在這個任務中需要付出多少努力才能完成？", val:effort, set:setEffort, lo:"非常低", hi:"非常高" },
-    { label:"主觀掌控感", desc:"在這個過程中，你感覺自己對情緒狀態的掌控程度如何？", val:control, set:setControl, lo:"完全沒有掌控", hi:"完全掌控" },
-  ];
-
-  return (
-    <div style={{ maxWidth:600, margin:"0 auto", padding:"1.5rem 1rem" }}>
-      <p style={{ fontSize:18, fontWeight:500, marginBottom:"0.25rem" }}>任務後問卷</p>
-      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:"2rem" }}>請根據剛才的任務經驗作答，每題都請填寫。</p>
-
-      {sliders.map(s => (
-        <div key={s.label} style={{ background:"var(--bg)", border:"0.5px solid var(--border)", borderRadius:"var(--radius)", padding:"1.25rem", marginBottom:"1rem" }}>
-          <p style={{ fontWeight:500, marginBottom:"0.25rem" }}>{s.label}</p>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:"1.25rem" }}>{s.desc}</p>
-          <input type="range" min="0" max="100" step="1" value={s.val} onChange={e => s.set(Number(e.target.value))} style={{ width:"100%" }} />
-          <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--text-tertiary)", marginTop:6 }}>
-            <span>{s.lo}</span>
-            <span style={{ fontWeight:500, color:"var(--text)", fontSize:15 }}>{s.val}</span>
-            <span>{s.hi}</span>
-          </div>
-        </div>
-      ))}
-
-      <div style={{ background:"var(--bg)", border:"0.5px solid var(--border)", borderRadius:"var(--radius)", padding:"1.25rem", marginBottom:"1.5rem" }}>
-        <p style={{ fontWeight:500, marginBottom:"0.25rem" }}>情緒改善歸因</p>
-        <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:"1.25rem" }}>
-          針對你情緒狀態的改善（若有），你認為主要是因為什麼？
-        </p>
-        <input type="range" min="0" max="100" step="1" value={attribution} onChange={e => setAttribution(Number(e.target.value))} style={{ width:"100%", marginBottom:"1rem" }} />
-        <div style={{ display:"flex", gap:10 }}>
-          {[
-            { label:"0", desc:"完全靠自己（自己想通、轉念或安撫自己）", hi:false },
-            { label:"100", desc: isAI ? "完全靠 AI（AI 的回應直接幫助了我）" : "完全靠這段時間本身（休息本身幫助了我）", hi:true }
-          ].map(({ label, desc, hi }) => (
-            <div key={label} style={{ flex:1, background: hi ? (attribution > 60 ? "var(--bg-info)" : "var(--bg-secondary)") : (attribution < 40 ? "var(--bg-success)" : "var(--bg-secondary)"), border:`0.5px solid ${hi ? (attribution > 60 ? "var(--border-info)" : "var(--border)") : (attribution < 40 ? "var(--border-success)" : "var(--border)")}`, borderRadius:"var(--radius)", padding:"0.75rem", fontSize:12, color: hi ? (attribution > 60 ? "var(--text-info)" : "var(--text-secondary)") : (attribution < 40 ? "var(--text-success)" : "var(--text-secondary)"), transition:"all 0.2s" }}>
-              <strong style={{ display:"block", marginBottom:4 }}>{label}</strong>{desc}
-            </div>
-          ))}
-        </div>
-        <p style={{ textAlign:"center", fontSize:20, fontWeight:500, margin:"1rem 0 0.25rem" }}>{attribution}</p>
-      </div>
-
-      <button
-        onClick={() => onDone({ emotion, mental_demand: mentalDemand, effort, control, attribution })}
-        className="primary" style={{ width:"100%", padding:"0.625rem" }}
-      >
-        完成並送出 ✓
-      </button>
-    </div>
-  );
-}
-
-// ── Screen 5: Done ────────────────────────────────────────────
-
+// ── DoneScreen ────────────────────────────────────────────────────
 function DoneScreen({ dayNum, pid, onLogout }: { dayNum: number; pid: string; onLogout: () => void }) {
   const [showSupport, setShowSupport] = useState(false);
   const remaining = 7 - dayNum;
@@ -592,6 +510,132 @@ function DoneScreen({ dayNum, pid, onLogout }: { dayNum: number; pid: string; on
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── PanasScreen（mPANAS 前後測）────────────────────────────────────
+const PANAS_ITEMS = [
+  { id: "p01", label: "感興趣的" },
+  { id: "p02", label: "悲傷的" },
+  { id: "p03", label: "興奮的" },
+  { id: "p04", label: "沮喪的" },
+  { id: "p05", label: "堅強的" },
+  { id: "p06", label: "內疚的" },
+  { id: "p07", label: "驚嚇的" },
+  { id: "p08", label: "懷有敵意的" },
+  { id: "p09", label: "熱衷的" },
+  { id: "p10", label: "驕傲的" },
+  { id: "p11", label: "煩躁的" },
+  { id: "p12", label: "機警的" },
+  { id: "p13", label: "羞愧的" },
+  { id: "p14", label: "受到鼓舞的" },
+  { id: "p15", label: "緊張的" },
+  { id: "p16", label: "果決的" },
+  { id: "p17", label: "專注的" },
+  { id: "p18", label: "不安的" },
+  { id: "p19", label: "積極的" },
+  { id: "p20", label: "恐懼的" },
+  { id: "p21", label: "愉悅的" },
+  { id: "p22", label: "冷靜的" },
+  { id: "p23", label: "憂鬱的" },
+  { id: "p24", label: "沮喪的" },
+  { id: "p25", label: "失望的" },
+  { id: "p26", label: "快樂的" },
+  { id: "p27", label: "放鬆的" },
+  { id: "p28", label: "寬慰的" },
+  { id: "p29", label: "滿足的" },
+  { id: "p30", label: "好奇的" },
+  { id: "p31", label: "滿意的" },
+  { id: "p32", label: "驚訝的" },
+  { id: "p33", label: "生氣的" },
+  { id: "p34", label: "焦慮的" },
+  { id: "p35", label: "氣餒的" },
+  { id: "p36", label: "厭惡的" },
+  { id: "p37", label: "傷心的" },
+  { id: "p38", label: "疲倦的" },
+] as const;
+
+const PANAS_LABELS = ["非常輕微\n或完全沒有", "一點點", "中等程度", "相當多", "極度強烈"];
+
+function PanasScreen({
+  timing,
+  onDone,
+}: {
+  timing: "pre" | "post";
+  onDone: (data: Record<string, number>) => void;
+}) {
+  const [scores, setScores] = useState<Record<string, number>>(
+    Object.fromEntries(PANAS_ITEMS.map(item => [item.id, 0]))
+  );
+
+  const allAnswered = Object.values(scores).every(v => v > 0);
+
+  const title = timing === "pre" ? "任務前・情緒狀態" : "任務後・情緒狀態";
+  const desc = timing === "pre"
+    ? "在開始今日任務之前，請評估你現在的感受程度。"
+    : "完成今日任務之後，請評估你現在的感受程度。";
+
+  return (
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: "1.5rem 1rem" }}>
+      <p style={{ fontSize: 18, fontWeight: 500, marginBottom: "0.25rem" }}>{title}</p>
+      <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: "0.25rem" }}>{desc}</p>
+      <p style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: "1.5rem" }}>
+        請針對每個詞語，選擇最符合你<strong>此刻</strong>感受的程度。
+      </p>
+
+      {/* 標題列 */}
+      <div style={{ display: "grid", gridTemplateColumns: "120px repeat(5, 1fr)", gap: 4, marginBottom: "0.5rem", paddingLeft: "0.5rem" }}>
+        <div />
+        {PANAS_LABELS.map((label, i) => (
+          <div key={i} style={{ fontSize: 10, color: "var(--text-tertiary)", textAlign: "center", lineHeight: 1.3, whiteSpace: "pre-line" }}>
+            {label}
+          </div>
+        ))}
+      </div>
+
+      {PANAS_ITEMS.map(item => (
+        <div key={item.id} style={{
+          display: "grid",
+          gridTemplateColumns: "120px repeat(5, 1fr)",
+          gap: 4,
+          alignItems: "center",
+          padding: "0.4rem 0.5rem",
+          borderRadius: "var(--radius)",
+          background: scores[item.id] > 0 ? "var(--bg-secondary)" : "var(--bg)",
+          border: "0.5px solid var(--border)",
+          marginBottom: 4,
+        }}>
+          <span style={{ fontSize: 14, fontWeight: scores[item.id] > 0 ? 500 : 400 }}>
+            {item.label}
+          </span>
+          {[1, 2, 3, 4, 5].map(val => (
+            <label key={val} style={{ display: "flex", justifyContent: "center", cursor: "pointer" }}>
+              <input
+                type="radio"
+                name={item.id}
+                value={val}
+                checked={scores[item.id] === val}
+                onChange={() => setScores(prev => ({ ...prev, [item.id]: val }))}
+                style={{ width: 18, height: 18, cursor: "pointer" }}
+              />
+            </label>
+          ))}
+        </div>
+      ))}
+
+      <div style={{ marginTop: "1.5rem", marginBottom: "0.5rem", fontSize: 12, color: "var(--text-tertiary)", textAlign: "center" }}>
+        {allAnswered ? "✓ 全部填寫完畢" : `還有 ${Object.values(scores).filter(v => v === 0).length} 題未填寫`}
+      </div>
+
+      <button
+        onClick={() => onDone(scores)}
+        disabled={!allAnswered}
+        className="primary"
+        style={{ width: "100%", padding: "0.625rem" }}
+      >
+        {allAnswered ? (timing === "pre" ? "開始今日任務 →" : "繼續填寫問卷 →") : "請完成所有題目"}
+      </button>
     </div>
   );
 }

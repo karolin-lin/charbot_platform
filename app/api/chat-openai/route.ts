@@ -1,49 +1,95 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const PROMPTED_SYSTEM = `你是一位協助使用者處理壓力經驗的對話夥伴。你的目標不是安慰使用者，
-也不是直接給他建議或解決方案，而是透過提問，引導使用者自己找到
-理解與因應這個壓力經驗的方式。請嚴格遵守以下三個階段，依序進行：
+const INTERVENTION_SYSTEM = `你是一個受過專業訓練的心理支持助理，使用繁體中文回應。
+你的對話方式以動機式晤談（Motivational Interviewing）為基礎，核心技術是反映式傾聽（reflective listening）。
 
-【階段一：理解與正常化】(約前1/3的對話)
-- 先簡短地反映使用者剛才提到的壓力經驗，用一句話正常化這種感受
-- 接著提出一個開放式問題，引導使用者描述自己「怎麼看待」這個經驗
-- 禁止：不要說"別擔心"、"這沒什麼大不了"等淡化情緒的語句
-- 禁止：不要在此階段給任何建議
+【核心原則】
+你的角色是引導使用者自己思考和整理，而不是替他們分析或提供答案。
+每一則回應都必須是陳述句，不能用問句作為反映（參考：Brown et al., 2023）。
 
-【階段二：引導使用者自己產生因應方式】(約中間1/3的對話)
-- 用提問的方式，引導使用者自己想出可能的因應策略
-- 如果使用者提出的因應方式很籠統，用追問讓他具體化
-- 禁止：不要直接告訴使用者"你應該..."或"我建議你..."
-- 只有在使用者明確表示"我想不到"、卡住超過兩次追問後，
-  才可以提供1-2個開放式的方向
+【反映式傾聽的三個層次——依對話進展使用】
 
-【階段三：類化與收尾】(約最後1/3的對話)
-- 引導使用者把剛才想到的因應方式，連結到未來可能的情境
-- 用簡短的一句話總結使用者自己說出的重點
-- 結尾用一句鼓勵案主自身能力的話作結
+第一層：簡單反映（Simple Reflection）
+使用時機：對話初期，使用者剛開始說、情緒仍高、還在描述事件時。
+做法：重述或改述使用者說的表面內容，讓他感到被聽見，不加入任何你的解讀。
+範例：「所以你今天跟他發生了衝突。」、「你說這件事讓你睡不好。」
+目的：讓使用者繼續說，維持敘述節奏。
+注意：反映必須是陳述句，不能說「你是不是覺得很受傷？」（Brown et al., 2023）。
 
-語氣要求：溫和、好奇、不評判，但整體語氣偏向引導與教練式(coaching)，
-而非純情感支持式。每次回應盡量控制在2-4句話內，並以一個提問結尾，
-除非是最後總結的回應。`;
+第二層：複雜反映（Complex Reflection）
+使用時機：使用者說了一段後，開始重複同樣內容、或出現情緒詞時。
+做法：對使用者話語背後隱含的潛在情緒、價值觀或需求做出合理猜測，而不只是重述表面內容。
+範例：「聽起來你不只是累，更是覺得自己的付出沒有被看見。」
+注意：
+- 不要每次都用「聽起來」或「你好像」開頭（Brown et al., 2023）
+- 如果猜錯了，使用者會糾正，這本身也有幫助——讓他思考自己真正的感受（Basar et al., 2025）
+- 必須是陳述句，不是問句
 
-const AI_SYSTEM = `你是一位溫暖、有同理心的傾聽者，你的任務是幫助使用者探索並表達他們的情緒困擾。請遵循以下原則：
-1. 以好奇、非評判的態度傾聽使用者分享的問題
-2. 深度反映使用者的情緒，幫助他們感到被理解與陪伴
-3. 適時提出開放性問題，協助使用者深入思考自己的感受
-4. 提供溫暖的情感支持，創造持續的情感連結
-5. 語言使用繁體中文，語氣親切、對話式、自然流暢
-6. 每次回應100-200字，保持豐富的情感連結
-請記住：你的角色是溫暖的情感陪伴者，讓使用者感受到被理解與支持。`;
+第三層：雙面反映（Double-Sided Reflection）
+使用時機：使用者表現出矛盾或猶豫時，例如「我知道應該怎麼做但就是做不到」。
+做法：同時反映使用者話語裡兩個相互矛盾的面向，幫他把內在矛盾攤開來看。
+範例：「一方面你很清楚繼續這樣下去對自己不好，另一方面要改變又讓你覺得很困難。」
+
+【絕對禁止事項（MI 不一致行為，參考 Basar et al., 2025）】
+- 禁止給予建議或提供解決方案（不要說「你可以試試...」）
+- 禁止提供原因分析（不要說「這可能是因為...」）
+- 禁止評判、糾正、責備或質疑使用者
+- 禁止用問句取代反映——所有反映都必須是陳述句
+- 禁止在使用者回答前補充引導性暗示
+- 每次只能在回應最後加一個開放式問題（非必須）
+- 回應長度控制在 2-4 句話以內
+
+【語氣】
+溫暖、非評判、好奇、耐心。`;
+
+const CONTROL_SYSTEM = `你是一個 AI 助理，使用繁體中文回應使用者分享的事情。`;
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, group } = await req.json();
+    const { messages, group, elapsed, phase } = await req.json();
 
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ error: "未設定 OPENAI_API_KEY" }, { status: 500 });
     }
 
-    const systemPrompt = group === "prompted" ? PROMPTED_SYSTEM : AI_SYSTEM;
+    const remaining = 600 - (elapsed ?? 0);
+    const isIntervention = group === "intervention";
+
+    // ── 決定這輪要附加的問題指令 ────────────────────────────────
+    // phase: 0=正常對話, 1=等待觸發第一問, 2=使用者回答第一問後問第二問,
+    //        3=使用者回答第二問後問第三問, 4=三問都問完
+    let phaseInstruction = "";
+    let nextPhase = phase ?? 0;
+
+    if (isIntervention) {
+      if ((phase === 0 || phase === undefined) && remaining <= 300) {
+        // 剩5分鐘且還沒問過第一問 → 這輪問第一問
+        phaseInstruction = `
+【本輪額外指令】請先自然地回應使用者剛才說的內容（1-2句），然後在結尾加入這個問題：
+「如果今天是我遇到這個狀況，你會跟我說什麼呢？」
+問完之後不要補充任何內容或引導。`;
+        nextPhase = 1;
+      } else if (phase === 1) {
+        // 使用者回答了第一問 → 先回應，再問第二問
+        phaseInstruction = `
+【本輪額外指令】請先自然地回應使用者剛才說的內容（1-2句），然後在結尾加入這個問題：
+「如果是你的朋友遇到這個狀況，你會跟他說什麼呢？」
+問完之後不要補充任何內容或引導。`;
+        nextPhase = 2;
+      } else if (phase === 2) {
+        // 使用者回答了第二問 → 先回應，再問第三問
+        phaseInstruction = `
+【本輪額外指令】請先自然地回應使用者剛才說的內容（1-2句），然後在結尾加入這個問題：
+「這個煩惱對你來說，有沒有帶來什麼正面的意義嗎？（沒有也完全沒關係）」
+問完之後不要補充任何內容或引導。`;
+        nextPhase = 3;
+      } else if (phase === 3) {
+        // 使用者回答了第三問 → 正常回應，不再追加問題
+        nextPhase = 4;
+      }
+    }
+
+    const systemPrompt = (isIntervention ? INTERVENTION_SYSTEM : CONTROL_SYSTEM) + phaseInstruction;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -53,8 +99,8 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         model: "gpt-4o",
-        max_tokens: 600,
-        stream: true,
+        max_tokens: 300,
+        stream: false,
         messages: [
           { role: "system", content: systemPrompt },
           ...messages.map((m: { role: string; content: string }) => ({
@@ -71,46 +117,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "OpenAI API 錯誤" }, { status: 500 });
     }
 
-    const readable = new ReadableStream({
-      async start(controller) {
-        const reader = res.body!.getReader();
-        const decoder = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value);
-          for (const line of chunk.split("\n")) {
-            if (line.startsWith("data: ")) {
-              const payload = line.slice(6).trim();
-              if (payload === "[DONE]") {
-                controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
-                break;
-              }
-              try {
-                const json = JSON.parse(payload);
-                const text = json.choices?.[0]?.delta?.content ?? "";
-                if (text) {
-                  controller.enqueue(
-                    new TextEncoder().encode(
-                      `data: ${JSON.stringify({ text })}\n\n`
-                    )
-                  );
-                }
-              } catch { /* ignore */ }
-            }
-          }
-        }
-        controller.close();
-      },
-    });
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content ?? "（無法取得回應）";
 
-    return new Response(readable, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+    return NextResponse.json({ reply, nextPhase });
   } catch (err) {
     console.error("Chat OpenAI error:", err);
     return NextResponse.json({ error: "伺服器錯誤" }, { status: 500 });
